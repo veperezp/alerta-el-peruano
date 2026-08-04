@@ -1,23 +1,18 @@
 """
 Monitor de Normas Legales - El Peruano
 ----------------------------------------
-Revisa la página de Normas Legales de El Peruano, busca coincidencias
-con una lista de palabras clave, y envía una notificación por Telegram
-cuando encuentra algo nuevo que no se había notificado antes.
-
-Esta versión incluye diagnóstico: intenta llenar el rango de fechas y
-pulsar "Buscar", y guarda una captura de pantalla + el HTML completo
-como evidencia, para poder ajustar los selectores si algo falla.
+Revisa la página de Normas Legales de El Peruano (usa el listado que
+carga por defecto al abrir la página, sin filtrar por fecha), busca
+coincidencias con una lista de palabras clave, y envía una notificación
+por Telegram cuando encuentra algo nuevo que no se había notificado antes.
 
 Pensado para ejecutarse cada 5 minutos vía GitHub Actions.
 """
 
 import os
-import re
 import json
 import hashlib
 import sys
-import datetime
 from playwright.sync_api import sync_playwright
 import requests
 
@@ -35,9 +30,9 @@ KEYWORDS = [
     "ley 27444",
     "ley n 27444",
     "ley del procedimiento administrativo general",
-    "hidrocarburos", 
+    "hidrocarburos",
+    "SUNAT",
     "combustible",
-    "SUNAT",    
 ]
 
 STATE_FILE = "seen.json"
@@ -82,101 +77,11 @@ def send_telegram(text: str) -> None:
     resp.raise_for_status()
 
 
-def try_fill_dates(page):
-    """Intenta llenar los campos de fecha con el día de hoy, probando
-    varias estrategias porque no conocemos los selectores exactos."""
-    today_iso = datetime.date.today().isoformat()          # 2026-08-03
-    today_ddmmyyyy = datetime.date.today().strftime("%d/%m/%Y")  # 03/08/2026
-
-    filled_any = False
-
-    # Estrategia 1: inputs nativos type="date"
-    try:
-        date_inputs = page.locator('input[type="date"]')
-        count = date_inputs.count()
-        if count > 0:
-            for i in range(count):
-                date_inputs.nth(i).fill(today_iso)
-                filled_any = True
-            print(f"[fechas] Rellenados {count} input(s) type=date con {today_iso}")
-    except Exception as e:
-        print(f"[fechas] Estrategia type=date falló: {e}")
-
-    # Estrategia 2: inputs con id/name/placeholder que mencionen desde/hasta/fecha
-    if not filled_any:
-        for kw in ["desde", "hasta", "fecha"]:
-            for attr in ["id", "name", "placeholder"]:
-                try:
-                    sel = f'input[{attr}*="{kw}" i]'
-                    loc = page.locator(sel)
-                    c = loc.count()
-                    if c > 0:
-                        for i in range(c):
-                            loc.nth(i).fill(today_ddmmyyyy)
-                            filled_any = True
-                        print(f"[fechas] Rellenado(s) {c} input(s) via {sel} con {today_ddmmyyyy}")
-                except Exception:
-                    pass
-
-    return filled_any
-
-
-def try_click_buscar(page):
-    """Intenta pulsar un botón/enlace de 'Buscar' probando varias formas."""
-    strategies = [
-        lambda: page.get_by_role("button", name=re.compile("buscar", re.IGNORECASE)).first.click(timeout=4000),
-        lambda: page.get_by_role("link", name=re.compile("buscar", re.IGNORECASE)).first.click(timeout=4000),
-        lambda: page.locator('text=/buscar/i').first.click(timeout=4000),
-        lambda: page.locator('input[type="submit"]').first.click(timeout=4000),
-        lambda: page.locator('button').first.click(timeout=4000),
-    ]
-    for i, strat in enumerate(strategies):
-        try:
-            strat()
-            print(f"[buscar] Estrategia {i+1} de clic funcionó.")
-            return True
-        except Exception:
-            continue
-    print("[buscar] Ninguna estrategia de clic en 'Buscar' funcionó.")
-    return False
-
-
-def describe_page_elements(page):
-    """Imprime en el log qué inputs y botones detecta, para poder
-    ajustar los selectores mirando el log si hace falta."""
-    try:
-        inputs = page.locator("input")
-        n = inputs.count()
-        print(f"[diagnóstico] Se encontraron {n} elemento(s) <input> en la página:")
-        for i in range(min(n, 20)):
-            el = inputs.nth(i)
-            try:
-                attrs = el.evaluate(
-                    "e => ({id: e.id, name: e.name, type: e.type, placeholder: e.placeholder})"
-                )
-                print(f"    input #{i}: {attrs}")
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"[diagnóstico] No se pudo listar inputs: {e}")
-
-    try:
-        buttons = page.locator("button, input[type=submit], a")
-        n = buttons.count()
-        texts = []
-        for i in range(min(n, 40)):
-            try:
-                t = buttons.nth(i).inner_text(timeout=500).strip()
-                if t:
-                    texts.append(t)
-            except Exception:
-                pass
-        print(f"[diagnóstico] Textos de botones/enlaces visibles (primeros 40): {texts}")
-    except Exception as e:
-        print(f"[diagnóstico] No se pudo listar botones: {e}")
-
-
 def get_page_lines():
+    """Abre la página con un navegador real (headless). NO toca los campos
+    de fecha ni el botón Buscar: el listado más reciente ya carga solo por
+    defecto al abrir la página, así que solo esperamos a que termine de
+    renderizarse y leemos el texto visible."""
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(user_agent=(
@@ -184,25 +89,20 @@ def get_page_lines():
             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
         ))
         page.goto(URL, timeout=90000, wait_until="load")
-        page.wait_for_timeout(3000)
+
+        # Margen para que el listado por defecto termine de cargar vía AJAX
+        page.wait_for_timeout(10000)
 
         print(f"[diagnóstico] Título de la página: {page.title()}")
-        describe_page_elements(page)
-
-        try_fill_dates(page)
-        try_click_buscar(page)
-
-        page.wait_for_timeout(10000)  # margen para que responda el AJAX
 
         body_text = page.inner_text("body")
 
-        # Evidencia para depurar si aún no funciona
+        # Evidencia para verificar / depurar
         try:
             page.screenshot(path="debug_screenshot.png", full_page=True)
             print("[diagnóstico] Captura guardada en debug_screenshot.png")
         except Exception as e:
             print(f"[diagnóstico] No se pudo tomar captura: {e}")
-
         try:
             with open("debug_page.html", "w", encoding="utf-8") as f:
                 f.write(page.content())
@@ -226,6 +126,9 @@ def main():
         sys.exit(1)
 
     print(f"Líneas de texto extraídas de la página: {len(lines)}")
+    print("[diagnóstico] Primeras 25 líneas extraídas:")
+    for l in lines[:25]:
+        print(f"    {l}")
 
     new_hits = []
     for line in lines:
