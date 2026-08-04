@@ -31,6 +31,17 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor.py
 
+      - name: Subir evidencia de depuración
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-evidence
+          path: |
+            debug_screenshot.png
+            debug_page.html
+          retention-days: 3
+          if-no-files-found: ignore
+
       - name: Commit updated state (si hubo novedades)
         run: |
           git config user.name "monitor-bot"
