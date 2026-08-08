@@ -31,8 +31,6 @@ KEYWORDS = [
     "ley n 27444",
     "ley del procedimiento administrativo general",
     "hidrocarburos",
-    "SUNAT",
-    "combustible",
 ]
 
 STATE_FILE = "seen.json"
