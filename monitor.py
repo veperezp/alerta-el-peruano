@@ -2,7 +2,8 @@
 Monitor de Normas Legales - El Peruano
 ----------------------------------------
 Revisa la página de Normas Legales de El Peruano (usa el listado que
-carga por defecto al abrir la página, sin filtrar por fecha), busca
+carga por defecto al abrir la página, sin filtrar por fecha), hace scroll
+por toda la página para forzar que cargue todo el contenido, busca
 coincidencias con una lista de palabras clave, y envía una notificación
 por Telegram cuando encuentra algo nuevo que no se había notificado antes.
 
@@ -75,11 +76,23 @@ def send_telegram(text: str) -> None:
     resp.raise_for_status()
 
 
+def scroll_full_page(page, max_steps=25, pause_ms=600):
+    """Baja por toda la página en pasos, para forzar que cualquier
+    contenido que cargue de forma progresiva (scroll infinito, imágenes
+    diferidas, etc.) termine de aparecer antes de leer el texto."""
+    prev_height = -1
+    for _ in range(max_steps):
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(pause_ms)
+        curr_height = page.evaluate("document.body.scrollHeight")
+        if curr_height == prev_height:
+            break
+        prev_height = curr_height
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(500)
+
+
 def get_page_lines():
-    """Abre la página con un navegador real (headless). NO toca los campos
-    de fecha ni el botón Buscar: el listado más reciente ya carga solo por
-    defecto al abrir la página, así que solo esperamos a que termine de
-    renderizarse y leemos el texto visible."""
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(user_agent=(
@@ -87,15 +100,16 @@ def get_page_lines():
             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
         ))
         page.goto(URL, timeout=90000, wait_until="load")
+        page.wait_for_timeout(8000)  # espera inicial para que arranque el AJAX
 
-        # Margen para que el listado por defecto termine de cargar vía AJAX
-        page.wait_for_timeout(10000)
+        scroll_full_page(page)
+
+        page.wait_for_timeout(3000)  # margen final
 
         print(f"[diagnóstico] Título de la página: {page.title()}")
 
         body_text = page.inner_text("body")
 
-        # Evidencia para verificar / depurar
         try:
             page.screenshot(path="debug_screenshot.png", full_page=True)
             print("[diagnóstico] Captura guardada en debug_screenshot.png")
@@ -124,8 +138,15 @@ def main():
         sys.exit(1)
 
     print(f"Líneas de texto extraídas de la página: {len(lines)}")
-    print("[diagnóstico] Primeras 25 líneas extraídas:")
-    for l in lines[:25]:
+
+    full_normalized = normalize("\n".join(lines))
+    print("[diagnóstico] Cuántas veces aparece cada palabra clave en el texto completo:")
+    for kw in KEYWORDS:
+        count = full_normalized.count(kw)
+        print(f"    '{kw}': {count}")
+
+    print("[diagnóstico] Primeras 60 líneas extraídas:")
+    for l in lines[:60]:
         print(f"    {l}")
 
     new_hits = []
